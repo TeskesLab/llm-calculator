@@ -475,6 +475,61 @@
   {
     "type": "discrete",
     "vendor": "nvidia",
+    "key": "p4_8",
+    "factor": 0.7,
+    "memory": 8,
+    "label": "Tesla P4 (8GB)",
+    "tdp_watts": 75,
+    "hourly_price_usd": 0.12,
+    "category": "datacenter"
+  },
+  {
+    "type": "discrete",
+    "vendor": "nvidia",
+    "key": "p40_24",
+    "factor": 1.2,
+    "memory": 24,
+    "label": "Tesla P40 (24GB)",
+    "tdp_watts": 250,
+    "hourly_price_usd": 0.35,
+    "category": "datacenter"
+  },
+  {
+    "type": "discrete",
+    "vendor": "nvidia",
+    "key": "p100_16",
+    "factor": 1.5,
+    "memory": 16,
+    "label": "Tesla P100 (16GB)",
+    "tdp_watts": 300,
+    "hourly_price_usd": 0.45,
+    "category": "datacenter"
+  },
+  {
+    "type": "discrete",
+    "vendor": "nvidia",
+    "key": "v100_16",
+    "factor": 2.0,
+    "memory": 16,
+    "label": "Tesla V100 (16GB)",
+    "tdp_watts": 300,
+    "hourly_price_usd": 0.6,
+    "category": "datacenter"
+  },
+  {
+    "type": "discrete",
+    "vendor": "nvidia",
+    "key": "v100_32",
+    "factor": 2.1,
+    "memory": 32,
+    "label": "Tesla V100 (32GB)",
+    "tdp_watts": 300,
+    "hourly_price_usd": 0.75,
+    "category": "datacenter"
+  },
+  {
+    "type": "discrete",
+    "vendor": "nvidia",
     "key": "a2_16",
     "factor": 0.5,
     "memory": 16,
@@ -632,7 +687,7 @@
     "key": "gb10_128",
     "factor": 3,
     "memory": 128,
-    "label": "GB10 Grace Blackwell (128GB) — DGX Spark",
+    "label": "GB10 Grace Blackwell (128GB) \u2014 DGX Spark",
     "tdp_watts": 140,
     "hourly_price_usd": null,
     "category": "consumer"
