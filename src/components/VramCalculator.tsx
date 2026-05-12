@@ -191,6 +191,7 @@ export function VramCalculator() {
   const [numSamples, setNumSamples] = useState<number | null>(1000);
   const [tokensPerSample, setTokensPerSample] = useState<number | null>(1024);
   const [numEpochs, setNumEpochs] = useState<number | null>(3);
+  const [energyCostPerKwh, setEnergyCostPerKwh] = useState<number | null>(null);
   const [carbonIntensity, setCarbonIntensity] = useState<number | null>(null);
 
   // Interconnect
@@ -256,6 +257,7 @@ export function VramCalculator() {
         num_samples: calcMode === "finetuning" ? numSamples : null,
         tokens_per_sample: calcMode === "finetuning" ? tokensPerSample : null,
         num_epochs: calcMode === "finetuning" ? numEpochs : null,
+        energy_cost_per_kwh: energyCostPerKwh,
       };
 
       const res = calculateVram(input);
@@ -271,7 +273,7 @@ export function VramCalculator() {
     enableOffloading, offloadTarget, numOffloadLayers, offloadKvCache,
     calcMode, finetuningMethod, finetuningQuant, loraRank, gradAccumSteps,
     optimizationPreset, numSamples, tokensPerSample, numEpochs,
-    carbonIntensity, interconnectType,
+    carbonIntensity, interconnectType, energyCostPerKwh,
   ]);
 
   useEffect(() => {
@@ -380,6 +382,7 @@ export function VramCalculator() {
   const breakdown = result?.memory_breakdown ?? [];
   const trainingTps = result?.training_tps ?? 0;
   const totalTrainingTime = result?.total_training_time_hours ?? 0;
+  const energyCostPerHour = result?.energy_cost_per_hour_usd ?? 0;
 
   const getStatusColor = (status: string) => {
     const s = status.toLowerCase();
@@ -805,6 +808,28 @@ export function VramCalculator() {
                   />
                 </>
               )}
+
+              {/* Energy Cost */}
+              <Box>
+                <Text size="sm" fw={500} mb={4}>
+                  Electricity Price ($/kWh)
+                </Text>
+                <Text size="xs" c="dimmed" mb={4}>
+                  Optional. Used to estimate hourly operating cost from GPU power draw.
+                </Text>
+                <NumberInput
+                  value={energyCostPerKwh ?? ""}
+                  onChange={(v) =>
+                    setEnergyCostPerKwh(v === "" ? null : Number(v))
+                  }
+                  placeholder="e.g. 0.16"
+                  min={0}
+                  max={10}
+                  step={0.01}
+                  decimalScale={4}
+                  prefix="$"
+                />
+              </Box>
             </Stack>
           </Grid.Col>
 
@@ -996,14 +1021,25 @@ export function VramCalculator() {
                 </Card>
               )}
 
-              {offloadedMem > 0 && (
-                <Card withBorder>
-                  <Text size="xs" c="dimmed" mb={4}>
-                    Offloaded Memory
-                  </Text>
-                  <Text fw={700}>{formatBytes(offloadedMem)}</Text>
-                </Card>
-              )}
+               {offloadedMem > 0 && (
+                 <Card withBorder>
+                   <Text size="xs" c="dimmed" mb={4}>
+                     Offloaded Memory
+                   </Text>
+                   <Text fw={700}>{formatBytes(offloadedMem)}</Text>
+                 </Card>
+               )}
+
+               {energyCostPerHour > 0 && (
+                 <Card withBorder>
+                   <Text size="xs" c="dimmed" mb={4}>
+                     Energy Cost
+                   </Text>
+                   <Text fw={700}>
+                     ${energyCostPerHour.toFixed(3)}/h
+                   </Text>
+                 </Card>
+               )}
 
               {/* Memory Breakdown */}
               {breakdown.length > 0 && (

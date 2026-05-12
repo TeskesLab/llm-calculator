@@ -313,6 +313,7 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     num_samples,
     tokens_per_sample,
     num_epochs,
+    energy_cost_per_kwh,
   } = input;
 
   const bytesPerParam = getBytesPerParam(quantization);
@@ -489,7 +490,7 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     carbonPerYear = round4(carbonPerDay * 365);
   }
 
-  // --- Training-specific metrics ---
+  // --- Training-specific metrics & Energy cost ---
   let trainingTps: number | undefined;
   let samplesPerSec: number | undefined;
   let stepsPerSec: number | undefined;
@@ -510,11 +511,14 @@ export function calculateVram(input: CalculationInput): CalculationResult {
       (num_samples * num_epochs) / effectiveBatchSize
     );
     totalTrainingTimeHours = round4((totalSteps * secsPerStep) / 3600);
+  }
 
-    // Energy cost
-    const energyCost = 0.16; // $0.16/kWh default
-    energyCostPerHour = round4((powerDraw / 1000) * energyCost * num_gpus);
-    energyCostTotal = round4(energyCostPerHour * totalTrainingTimeHours);
+  if (energy_cost_per_kwh != null && energy_cost_per_kwh > 0) {
+    const powerKw = powerDraw / 1000;
+    energyCostPerHour = round4(powerKw * energy_cost_per_kwh * num_gpus);
+    if (totalTrainingTimeHours != null) {
+      energyCostTotal = round4(energyCostPerHour * totalTrainingTimeHours);
+    }
   }
 
   // Apply concurrent users to throughput for inference

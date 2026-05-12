@@ -64,6 +64,7 @@ export interface CalculationInput {
   num_samples: number | null;
   tokens_per_sample: number | null;
   num_epochs: number | null;
+  energy_cost_per_kwh: number | null;
 }
 
 export interface MemoryBreakdownItem {
