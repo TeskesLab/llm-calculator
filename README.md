@@ -27,7 +27,6 @@ Edit [`src/data/gpu-data.json`](src/data/gpu-data.json). Each entry follows this
   "memory": 24,
   "factor": 4.0,
   "tdp_watts": 450,
-  "hourly_price_usd": 0.79,
   "category": "consumer | datacenter | workstation"
 }
 ```
