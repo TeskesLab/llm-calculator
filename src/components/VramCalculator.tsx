@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   Paper,
   Title,
@@ -16,6 +16,7 @@ import {
   Tabs,
   Divider,
   Box,
+  SimpleGrid,
 } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import {
@@ -23,8 +24,10 @@ import {
   IconBolt,
   IconClock,
   IconUsers,
+  IconChartPie,
 } from "@tabler/icons-react";
-import { calculateVram, getGpuList, initWasm, type GpuInfo, type CalculationInput, type CalculationResult } from "../wasm-loader";
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
+import { calculateVram, getGpuList, type GpuInfo, type CalculationInput, type CalculationResult } from "../engine";
 import { models, getModelBySlug } from "../data/models";
 
 const QUANTIZATION_OPTIONS = [
@@ -111,6 +114,12 @@ const OPTIMIZATION_PRESETS = [
   { value: "custom", label: "Custom" },
 ];
 
+const PIE_COLORS = [
+  "#50E3C2", "#4A90D9", "#F5A623", "#7ED321",
+  "#BD10E0", "#D0021B", "#F8E71C", "#8B572A",
+  "#417505", "#9013FE",
+];
+
 const CARBON_REGIONS = [
   { value: "475", label: "Global Average (475 g/kWh)" },
   { value: "380", label: "US (380 g/kWh)" },
@@ -138,9 +147,8 @@ const defaultModel = models.find(
 ) || models[0];
 
 export function VramCalculator() {
-  // GPU list from WASM
-  const [gpuList, setGpuList] = useState<GpuInfo[]>([]);
-  const [gpuListLoaded, setGpuListLoaded] = useState(false);
+  // GPU list loaded synchronously
+  const [gpuList] = useState<GpuInfo[]>(() => getGpuList());
 
   // Calculation mode
   const [calcMode, setCalcMode] = useState<"inference" | "finetuning">("inference");
@@ -192,23 +200,6 @@ export function VramCalculator() {
   const [result, setResult] = useState<CalculationResult | null>(null);
   const [calculating, setCalculating] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  // Load GPU list
-  useEffect(() => {
-    if (gpuListLoaded) return;
-    try {
-      const gpus = getGpuList();
-      setGpuList(gpus);
-      setGpuListLoaded(true);
-    } catch {
-      // Retry after WASM init
-      initWasm().then(() => {
-        const gpus = getGpuList();
-        setGpuList(gpus);
-        setGpuListLoaded(true);
-      });
-    }
-  }, [gpuListLoaded]);
 
   // Auto-calculate on input changes
   const [debouncedSeqLength] = useDebouncedValue(seqLength, 300);
@@ -376,35 +367,19 @@ export function VramCalculator() {
     return selectedGpu.memory;
   }, [selectedGpu]);
 
-  const vramUsage =
-    result?.vram_usage ?? result?.vramUsage ?? 0;
-  const vramPct =
-    result?.vram_percentage ??
-    result?.vramPercentage ??
-    result?.actual_vram_percentage ??
-    result?.actualVramPercentage ??
-    0;
-  const memoryStatus =
-    result?.memory_status ?? result?.memoryStatus ?? "Ready";
-  const tps =
-    result?.estimated_latency_tps ?? result?.estimatedLatencyTps ?? 0;
-  const throughputTps =
-    result?.estimated_throughput_tps ?? result?.estimatedThroughputTps ?? 0;
-  const perUserTps = result?.per_user_tps ?? result?.perUserTps ?? 0;
+  const vramUsage = result?.vram_usage ?? 0;
+  const vramPct = result?.vram_percentage ?? 0;
+  const memoryStatus = result?.memory_status ?? "Ready";
+  const tps = result?.estimated_latency_tps ?? 0;
+  const throughputTps = result?.estimated_throughput_tps ?? 0;
+  const perUserTps = result?.per_user_tps ?? 0;
   const tftt = result?.tftt ?? 0;
-  const powerDraw =
-    result?.estimated_power_draw ?? result?.estimatedPowerDraw ?? 0;
-  const sysRam =
-    result?.estimated_system_ram_required ??
-    result?.estimatedSystemRamRequired ??
-    0;
-  const offloadedMem =
-    result?.offloaded_memory ?? result?.offloadedMemory ?? 0;
-  const breakdown = result?.memory_breakdown ?? result?.memoryBreakdown ?? [];
-  const trainingTps =
-    result?.training_tps ?? result?.trainingTps ?? 0;
-  const totalTrainingTime =
-    result?.total_training_time_hours ?? result?.totalTrainingTimeHours ?? 0;
+  const powerDraw = result?.estimated_power_draw ?? 0;
+  const sysRam = result?.estimated_system_ram_required ?? 0;
+  const offloadedMem = result?.offloaded_memory ?? 0;
+  const breakdown = result?.memory_breakdown ?? [];
+  const trainingTps = result?.training_tps ?? 0;
+  const totalTrainingTime = result?.total_training_time_hours ?? 0;
 
   const getStatusColor = (status: string) => {
     const s = status.toLowerCase();
@@ -836,6 +811,56 @@ export function VramCalculator() {
           {/* Right Column - Results */}
           <Grid.Col span={{ md: 6 }}>
             <Stack gap="md">
+              {/* Model Details */}
+              {selectedModel && (
+                <Card withBorder>
+                  <Group gap="xs" mb="xs">
+                    <Badge variant="light" size="sm">
+                      {selectedModel.provider}
+                    </Badge>
+                  </Group>
+                  <Text fw={700} size="sm" mb="md">
+                    {selectedModel.name}
+                  </Text>
+                  <SimpleGrid cols={2} spacing="xs">
+                    <Box>
+                      <Text size="xs" c="dimmed">
+                        Weights
+                      </Text>
+                      <Text size="sm" fw={600}>
+                        {quantization.toUpperCase()}
+                      </Text>
+                    </Box>
+                    <Box>
+                      <Text size="xs" c="dimmed">
+                        KV Cache
+                      </Text>
+                      <Text size="sm" fw={600}>
+                        {calcMode === "inference"
+                          ? kvCacheQuant.toUpperCase()
+                          : "N/A"}
+                      </Text>
+                    </Box>
+                    <Box>
+                      <Text size="xs" c="dimmed">
+                        Attention
+                      </Text>
+                      <Text size="sm" fw={600}>
+                        {selectedModel.attention_structure?.toUpperCase() || "MHA"}
+                      </Text>
+                    </Box>
+                    <Box>
+                      <Text size="xs" c="dimmed">
+                        Pos. Embedding
+                      </Text>
+                      <Text size="sm" fw={600}>
+                        {selectedModel.position_embedding || "N/A"}
+                      </Text>
+                    </Box>
+                  </SimpleGrid>
+                </Card>
+              )}
+
               {/* VRAM Usage */}
               <Card withBorder>
                 <Group justify="space-between" mb="xs">
@@ -983,40 +1008,84 @@ export function VramCalculator() {
               {/* Memory Breakdown */}
               {breakdown.length > 0 && (
                 <Card withBorder>
-                  <Title order={5} mb="sm">
-                    Memory Breakdown
-                  </Title>
-                  <Stack gap="xs">
-                    {breakdown.map((item, i) => (
-                      <Box key={i}>
-                        <Group justify="space-between" mb={2}>
-                          <Text size="sm">{item.label}</Text>
-                          <Text size="sm" fw={500}>
-                            {item.size_gb != null
-                              ? formatBytes(item.size_gb)
-                              : `${item.value.toFixed(1)}%`}
+                  <Group gap="xs" mb="sm">
+                    <IconChartPie size={18} />
+                    <Title order={5}>
+                      Memory Breakdown
+                    </Title>
+                  </Group>
+                  <ResponsiveContainer width="100%" height={260}>
+                    <PieChart>
+                      <Pie
+                        data={breakdown.filter(
+                          (item) => item.size_gb > 0
+                        )}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={55}
+                        outerRadius={100}
+                        paddingAngle={2}
+                        dataKey="size_gb"
+                        nameKey="label"
+                        labelLine={{
+                          stroke: "#7CB0C1",
+                          strokeWidth: 1,
+                        }}
+                        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                        label={(props: any) => {
+                          const pct = vramUsage > 0
+                            ? ((props.value / vramUsage) * 100).toFixed(0)
+                            : "0";
+                          return `${pct}%`;
+                        }}
+                        style={{ fontSize: 10, fontFamily: "'Share Tech Mono', monospace" }}
+                      >
+                        {breakdown
+                          .filter((item) => item.size_gb > 0)
+                          .map((_, i) => (
+                            <Cell
+                              key={i}
+                              fill={PIE_COLORS[i % PIE_COLORS.length]}
+                              strokeWidth={0}
+                            />
+                          ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={{
+                          background: "#20323B",
+                          border: "1px solid #7CB0C1",
+                          borderRadius: 4,
+                          color: "#F5F7FA",
+                          fontFamily: "'Share Tech Mono', monospace",
+                        }}
+                        formatter={(_value: unknown) =>
+                          `${formatBytes(_value as number)}`
+                        }
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                  <Stack gap="xs" mt="sm">
+                    {breakdown
+                      .filter((item) => item.size_gb > 0)
+                      .map((item, i) => (
+                        <Group key={i} justify="space-between">
+                          <Group gap="xs">
+                            <Box
+                              w={10}
+                              h={10}
+                              style={{
+                                borderRadius: 2,
+                                backgroundColor:
+                                  PIE_COLORS[i % PIE_COLORS.length],
+                              }}
+                            />
+                            <Text size="xs">{item.label}</Text>
+                          </Group>
+                          <Text size="xs" fw={500}>
+                            {formatBytes(item.size_gb)}
                           </Text>
                         </Group>
-                        <Progress
-                          value={item.value}
-                          size="sm"
-                          color={
-                            [
-                              "violet",
-                              "blue",
-                              "cyan",
-                              "teal",
-                              "green",
-                              "lime",
-                              "yellow",
-                              "orange",
-                              "red",
-                              "pink",
-                            ][i % 10]
-                          }
-                        />
-                      </Box>
-                    ))}
+                      ))}
                   </Stack>
                 </Card>
               )}
