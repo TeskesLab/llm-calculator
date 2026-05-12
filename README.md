@@ -12,8 +12,6 @@ Estimate GPU VRAM requirements and generation speed for running large language m
 - Memory breakdown donut chart
 - Speed & throughput estimates
 - Energy cost from user-defined kWh price
-- Dark theme matching [Teske's Lab](https://lab.teske.live)
-
 ## Contributing
 
 ### Adding or Updating GPUs
