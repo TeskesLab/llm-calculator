@@ -340,7 +340,11 @@ export function calculateVram(input: CalculationInput): CalculationResult {
   // KV Cache (inference only)
   const kvCacheGb = isTraining ? 0 : calcKvCache(model, seq_length, batch_size, bytesPerKv);
 
-  // Activations
+  // KV Cache scales with concurrent users (one per user)
+  const kvCachePerUser = kvCacheGb;
+  const kvCacheTotal = kvCacheGb * Math.max(1, concurrent_users);
+
+  // Activations are shared across batched users
   const effectiveBatchSize = isTraining ? batch_size * gradient_accumulation_steps : batch_size;
   const activationsGb = calcActivations(model, seq_length, effectiveBatchSize, bytesPerParam);
 
@@ -367,14 +371,14 @@ export function calculateVram(input: CalculationInput): CalculationResult {
 
   // Compute subtotal BEFORE overhead to feed into overhead formula
   const subtotalGb = round2(
-    weightsGb + kvCacheGb + activationsGb + optimizerGb +
+    weightsGb + kvCacheTotal + activationsGb + optimizerGb +
     gradientsGb + loraOverheadGb + tempBuffersGb
   );
   const nonWeightGb = subtotalGb - weightsGb;
 
   // Framework overhead (calibrated: ~1GB base + small fraction of non-weight memory)
   let overheadGb = calcFrameworkOverhead(weightsGb, nonWeightGb);
-  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(weightsGb + activationsGb + kvCacheGb, num_gpus) : 0;
+  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(weightsGb + activationsGb + kvCacheTotal, num_gpus) : 0;
   if (num_gpus > 1) {
     overheadGb = round2(overheadGb + multiGpuOverheadGb);
   }
@@ -402,8 +406,8 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     }
   }
 
-  if (kvCacheGb > 0) {
-    breakdown.push({ label: "KV Cache", value: round4((kvCacheGb / totalUsage) * 100), size_gb: kvCacheGb });
+  if (kvCacheTotal > 0) {
+    breakdown.push({ label: "KV Cache", value: round4((kvCacheTotal / totalUsage) * 100), size_gb: kvCacheTotal });
   }
 
   if (loraOverheadGb > 0) {
@@ -421,7 +425,7 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     weightsGb + optimizerGb + gradientsGb + loraOverheadGb + overheadGb
   );
   const perUserMemory = round2(
-    (kvCacheGb + activationsGb) / Math.max(1, concurrent_users)
+    kvCachePerUser + (activationsGb / Math.max(1, concurrent_users))
   );
 
   // --- Offloading ---

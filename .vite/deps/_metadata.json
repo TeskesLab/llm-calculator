@@ -2,7 +2,77 @@
   "hash": "46865f86",
   "configHash": "c749905d",
   "lockfileHash": "4295d00d",
-  "browserHash": "0ee1fc0d",
-  "optimized": {},
-  "chunks": {}
+  "browserHash": "cc4c725c",
+  "optimized": {
+    "@mantine/core": {
+      "src": "../../node_modules/@mantine/core/esm/index.mjs",
+      "file": "@mantine_core.js",
+      "fileHash": "bef3a6be",
+      "needsInterop": false
+    },
+    "@mantine/hooks": {
+      "src": "../../node_modules/@mantine/hooks/esm/index.mjs",
+      "file": "@mantine_hooks.js",
+      "fileHash": "7f302183",
+      "needsInterop": false
+    },
+    "@mantine/notifications": {
+      "src": "../../node_modules/@mantine/notifications/esm/index.mjs",
+      "file": "@mantine_notifications.js",
+      "fileHash": "e3e08434",
+      "needsInterop": false
+    },
+    "@tabler/icons-react": {
+      "src": "../../node_modules/@tabler/icons-react/dist/esm/tabler-icons-react.mjs",
+      "file": "@tabler_icons-react.js",
+      "fileHash": "cb9051bd",
+      "needsInterop": false
+    },
+    "react-dom/client": {
+      "src": "../../node_modules/react-dom/client.js",
+      "file": "react-dom_client.js",
+      "fileHash": "b9570410",
+      "needsInterop": true
+    },
+    "react": {
+      "src": "../../node_modules/react/index.js",
+      "file": "react.js",
+      "fileHash": "54f3aca4",
+      "needsInterop": true
+    },
+    "react/jsx-dev-runtime": {
+      "src": "../../node_modules/react/jsx-dev-runtime.js",
+      "file": "react_jsx-dev-runtime.js",
+      "fileHash": "dd46f6dc",
+      "needsInterop": true
+    },
+    "recharts": {
+      "src": "../../node_modules/recharts/es6/index.js",
+      "file": "recharts.js",
+      "fileHash": "84917cf0",
+      "needsInterop": false
+    }
+  },
+  "chunks": {
+    "clsx-Lkrca6_3": {
+      "file": "clsx-Lkrca6_3.js",
+      "isDynamicEntry": false
+    },
+    "esm-CmB82CYz": {
+      "file": "esm-CmB82CYz.js",
+      "isDynamicEntry": false
+    },
+    "esm-DH0PSZnK": {
+      "file": "esm-DH0PSZnK.js",
+      "isDynamicEntry": false
+    },
+    "react-B35R_oEX": {
+      "file": "react-B35R_oEX.js",
+      "isDynamicEntry": false
+    },
+    "react-dom-CYDThRfy": {
+      "file": "react-dom-CYDThRfy.js",
+      "isDynamicEntry": false
+    }
+  }
 }
