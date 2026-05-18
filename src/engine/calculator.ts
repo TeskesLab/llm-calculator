@@ -369,6 +369,20 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     }
   }
 
+  // Keep an unsharded baseline for multi-GPU communication overhead.
+  const multiGpuOverheadBaseGb =
+    weightsGb + kvCacheTotal + activationsGb + optimizerGb + gradientsGb + loraOverheadGb + tempBuffersGb;
+
+  // Multi-GPU: shard model weights, optimizer states, and gradients across GPUs
+  // KV cache and activations stay per-GPU (each GPU processes its own shard)
+  if (num_gpus > 1) {
+    weightsGb = round2(weightsGb / num_gpus);
+    optimizerGb = round2(optimizerGb / num_gpus);
+    gradientsGb = round2(gradientsGb / num_gpus);
+    loraOverheadGb = round2(loraOverheadGb / num_gpus);
+    // Activations and KV cache are already per-GPU
+  }
+
   // Compute subtotal BEFORE overhead to feed into overhead formula
   const subtotalGb = round2(
     weightsGb + kvCacheTotal + activationsGb + optimizerGb +
@@ -378,7 +392,7 @@ export function calculateVram(input: CalculationInput): CalculationResult {
 
   // Framework overhead (calibrated: ~1GB base + small fraction of non-weight memory)
   let overheadGb = calcFrameworkOverhead(weightsGb, nonWeightGb);
-  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(weightsGb + activationsGb + kvCacheTotal, num_gpus) : 0;
+  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(multiGpuOverheadBaseGb, num_gpus) : 0;
   if (num_gpus > 1) {
     overheadGb = round2(overheadGb + multiGpuOverheadGb);
   }
@@ -451,13 +465,14 @@ export function calculateVram(input: CalculationInput): CalculationResult {
   const vramPct = Math.min(100, rawPct);
   const actualPct = Math.min(100, rawActualPct);
 
-  // Memory status: WASM thresholds appear to be around:
+  // Memory status based on effective per-GPU usage (after offloading).
+  // This aligns status with the displayed usage/progress.
   //   "Sufficient" < ~50%, "Okay" < ~65%, "Moderate" < ~80%, "High" < ~95%, "Insufficient"
   let memoryStatus: string;
-  if (rawActualPct >= 95 || effectiveUsage >= perGpuVram) memoryStatus = "Insufficient";
-  else if (rawActualPct >= 80) memoryStatus = "High";
-  else if (rawActualPct >= 65) memoryStatus = "Moderate";
-  else if (rawActualPct >= 50) memoryStatus = "Okay";
+  if (rawPct >= 95 || effectiveUsage >= perGpuVram) memoryStatus = "Insufficient";
+  else if (rawPct >= 80) memoryStatus = "High";
+  else if (rawPct >= 65) memoryStatus = "Moderate";
+  else if (rawPct >= 50) memoryStatus = "Okay";
   else memoryStatus = "Sufficient";
 
   // --- Performance ---

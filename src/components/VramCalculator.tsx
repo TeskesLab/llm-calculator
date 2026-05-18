@@ -142,6 +142,14 @@ function formatSpeed(tps: number): string {
   return `${tps.toFixed(1)} tok/s`;
 }
 
+function formatSequenceLength(tokens: number): string {
+  if (tokens >= 1024) {
+    const inKib = tokens / 1024;
+    return Number.isInteger(inKib) ? `${inKib}K` : `${inKib.toFixed(0)}K`;
+  }
+  return tokens.toString();
+}
+
 const defaultModel = models.find(
   (m) => m.name === "DeepSeek-R1 3B"
 ) || models[0];
@@ -156,6 +164,10 @@ export function VramCalculator() {
   // Model selection
   const [modelSlug, setModelSlug] = useState<string>(defaultModel?.slug || "");
   const selectedModel = useMemo(() => getModelBySlug(modelSlug), [modelSlug]);
+  const maxContextLength = useMemo(
+    () => Math.max(128, selectedModel?.context_length ?? 131072),
+    [selectedModel]
+  );
 
   // Quantization
   const [quantization, setQuantization] = useState<string>("fp16");
@@ -204,6 +216,23 @@ export function VramCalculator() {
 
   // Auto-calculate on input changes
   const [debouncedSeqLength] = useDebouncedValue(seqLength, 300);
+
+  useEffect(() => {
+    if (seqLength > maxContextLength) {
+      setSeqLength(maxContextLength);
+    }
+  }, [maxContextLength, seqLength]);
+
+  const seqLengthPresets = useMemo(() => {
+    const basePresets = [1024, 8192, 16384, 32768, 65536, 131072];
+    const withinLimit = basePresets.filter((v) => v <= maxContextLength);
+
+    if (!withinLimit.includes(maxContextLength)) {
+      withinLimit.push(maxContextLength);
+    }
+
+    return withinLimit.sort((a, b) => a - b);
+  }, [maxContextLength]);
 
   const doCalculate = useCallback(() => {
     if (!selectedModel) return;
@@ -635,32 +664,35 @@ export function VramCalculator() {
                     Sequence Length
                   </Text>
                   <Badge variant="light">
-                    {seqLength >= 1024
-                      ? `${(seqLength / 1024).toFixed(0)}K`
-                      : seqLength}
+                    {formatSequenceLength(seqLength)}
                   </Badge>
                 </Group>
                 <Group gap="xs" mb={4}>
-                  {[1024, 8192, 16384, 32768, 65536, 131072].map((v) => (
+                  {seqLengthPresets.map((v) => (
                     <Badge
                       key={v}
                       variant={seqLength === v ? "filled" : "outline"}
                       style={{ cursor: "pointer" }}
                       onClick={() => setSeqLength(v)}
                     >
-                      {v >= 1024 ? `${(v / 1024).toFixed(0)}K` : v}
+                      {formatSequenceLength(v)}
                     </Badge>
                   ))}
+                  <Badge
+                    variant={seqLength === maxContextLength ? "filled" : "outline"}
+                    style={{ cursor: "pointer" }}
+                    onClick={() => setSeqLength(maxContextLength)}
+                  >
+                    MAX
+                  </Badge>
                 </Group>
                 <Slider
                   value={seqLength}
                   onChange={setSeqLength}
                   min={128}
-                  max={131072}
+                  max={maxContextLength}
                   step={128}
-                  label={(v) =>
-                    v >= 1024 ? `${(v / 1024).toFixed(0)}K` : v.toString()
-                  }
+                  label={(v) => formatSequenceLength(v)}
                 />
               </Box>
 
@@ -910,9 +942,24 @@ export function VramCalculator() {
                     {formatBytes(vramUsage)}
                   </Text>
                   <Text c="dimmed" size="sm">
-                    of {formatBytes(effectiveVram * numGpus)} VRAM
+                    of {formatBytes(effectiveVram)} per GPU
                   </Text>
                 </Group>
+                {numGpus > 1 && (
+                  <Group justify="space-between" mt={4}>
+                    <Text c="dimmed" size="xs">
+                      Total usage across GPUs
+                    </Text>
+                    <Text size="xs" fw={600}>
+                      {formatBytes(vramUsage * numGpus)} / {formatBytes(effectiveVram * numGpus)}
+                    </Text>
+                  </Group>
+                )}
+                {numGpus > 1 && (
+                  <Text c="dimmed" size="xs" mt={4}>
+                    Total cluster VRAM: {formatBytes(effectiveVram * numGpus)}
+                  </Text>
+                )}
               </Card>
 
               {/* Speed Metrics */}
