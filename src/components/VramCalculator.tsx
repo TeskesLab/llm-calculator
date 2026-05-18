@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from "react";
+import { useState, useCallback, useMemo } from "react";
 import {
   Paper,
   Title,
@@ -27,7 +27,7 @@ import {
   IconChartPie,
 } from "@tabler/icons-react";
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
-import { calculateVram, getGpuList, type GpuInfo, type CalculationInput, type CalculationResult } from "../engine";
+import { calculateVram, getGpuList, getEffectiveVram, type GpuInfo, type CalculationInput, type CalculationResult } from "../engine";
 import { models, getModelBySlug } from "../data/models";
 
 const QUANTIZATION_OPTIONS = [
@@ -145,7 +145,7 @@ function formatSpeed(tps: number): string {
 function formatSequenceLength(tokens: number): string {
   if (tokens >= 1024) {
     const inKib = tokens / 1024;
-    return Number.isInteger(inKib) ? `${inKib}K` : `${inKib.toFixed(0)}K`;
+    return Number.isInteger(inKib) ? `${inKib}K` : `${inKib.toFixed(1)}K`;
   }
   return tokens.toString();
 }
@@ -209,19 +209,8 @@ export function VramCalculator() {
   // Interconnect
   const [interconnectType, setInterconnectType] = useState<string | null>(null);
 
-  // Results
-  const [result, setResult] = useState<CalculationResult | null>(null);
-  const [calculating, setCalculating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
   // Auto-calculate on input changes
   const [debouncedSeqLength] = useDebouncedValue(seqLength, 300);
-
-  useEffect(() => {
-    if (seqLength > maxContextLength) {
-      setSeqLength(maxContextLength);
-    }
-  }, [maxContextLength, seqLength]);
 
   const seqLengthPresets = useMemo(() => {
     const basePresets = [1024, 8192, 16384, 32768, 65536, 131072];
@@ -234,11 +223,16 @@ export function VramCalculator() {
     return withinLimit.sort((a, b) => a - b);
   }, [maxContextLength]);
 
-  const doCalculate = useCallback(() => {
-    if (!selectedModel) return;
+  const handleModelChange = useCallback((nextSlug: string | null) => {
+    if (!nextSlug) return;
+    const nextModel = getModelBySlug(nextSlug);
+    const nextMaxContext = Math.max(128, nextModel?.context_length ?? 131072);
+    setModelSlug(nextSlug);
+    setSeqLength((prev: number) => Math.min(prev, nextMaxContext));
+  }, []);
 
-    setCalculating(true);
-    setError(null);
+  const calculation = useMemo((): { result: CalculationResult | null; error: string | null } => {
+    if (!selectedModel) return { result: null, error: null };
 
     try {
       const input: CalculationInput = {
@@ -246,10 +240,14 @@ export function VramCalculator() {
           num_of_params: parseFloat(selectedModel.num_of_params),
           architecture: selectedModel.architecture,
           modality: selectedModel.modality || "text",
-          hidden_dim_size: selectedModel.hidden_dim_size,
-          num_of_layers: selectedModel.num_of_layers,
+          hidden_dim_size: selectedModel.hidden_dim_size ?? 4096,
+          num_of_layers: selectedModel.num_of_layers ?? 32,
           num_of_expert_params: selectedModel.num_of_expert_params || 0,
+          num_of_experts: selectedModel.num_of_experts || undefined,
+          num_of_active_experts: selectedModel.num_of_active_experts || undefined,
           attention_structure: selectedModel.attention_structure,
+          num_attention_heads: selectedModel.num_attention_heads || undefined,
+          num_key_value_heads: selectedModel.num_key_value_heads || undefined,
           position_embedding: selectedModel.position_embedding,
         },
         quantization,
@@ -289,12 +287,12 @@ export function VramCalculator() {
         energy_cost_per_kwh: energyCostPerKwh,
       };
 
-      const res = calculateVram(input);
-      setResult(res);
+      return { result: calculateVram(input), error: null };
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Calculation failed");
-    } finally {
-      setCalculating(false);
+      return {
+        result: null,
+        error: err instanceof Error ? err.message : "Calculation failed",
+      };
     }
   }, [
     selectedModel, quantization, kvCacheQuant, selectedGpuKey, isCustomGpu,
@@ -305,9 +303,9 @@ export function VramCalculator() {
     carbonIntensity, interconnectType, energyCostPerKwh,
   ]);
 
-  useEffect(() => {
-    if (selectedModel) doCalculate();
-  }, [doCalculate]);
+  const result = calculation.result;
+  const error = calculation.error;
+  const calculating = false;
 
   // Build GPU select options grouped by vendor
   const gpuSelectData = useMemo(() => {
@@ -394,9 +392,8 @@ export function VramCalculator() {
 
   // Get effective GPU VRAM
   const effectiveVram = useMemo(() => {
-    if (!selectedGpu) return 24;
-    return selectedGpu.memory;
-  }, [selectedGpu]);
+    return getEffectiveVram(selectedGpuKey, isCustomGpu ? customVram : null);
+  }, [selectedGpuKey, isCustomGpu, customVram]);
 
   const vramUsage = result?.vram_usage ?? 0;
   const vramPct = result?.vram_percentage ?? 0;
@@ -460,7 +457,7 @@ export function VramCalculator() {
                 <Select
                   data={modelSelectData}
                   value={modelSlug}
-                  onChange={(v) => v && setModelSlug(v)}
+                  onChange={handleModelChange}
                   searchable
                   placeholder="Search models..."
                   nothingFoundMessage="No models found"

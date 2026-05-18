@@ -26,13 +26,19 @@ function round4(n: number): number {
 // ---------------------------------------------------------------------------
 
 function getNumKvHeads(model: ModelVariant): number {
+  if (model.num_key_value_heads && model.num_key_value_heads > 0) {
+    return model.num_key_value_heads;
+  }
+
   const arch = (model.attention_structure || "mha").toLowerCase();
   if (arch === "mqa") return 1;
 
   const hiddenDim = model.hidden_dim_size || 4096;
   // Standard head_dim = 128 for most modern models
   const headDim = 128;
-  const numQueryHeads = Math.round(hiddenDim / headDim);
+  const numQueryHeads = model.num_attention_heads && model.num_attention_heads > 0
+    ? model.num_attention_heads
+    : Math.round(hiddenDim / headDim);
 
   if (arch === "gqa") {
     // For GQA, KV heads is typically num_query_heads / num_groups
@@ -369,10 +375,6 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     }
   }
 
-  // Keep an unsharded baseline for multi-GPU communication overhead.
-  const multiGpuOverheadBaseGb =
-    weightsGb + kvCacheTotal + activationsGb + optimizerGb + gradientsGb + loraOverheadGb + tempBuffersGb;
-
   // Multi-GPU: shard model weights, optimizer states, and gradients across GPUs
   // KV cache and activations stay per-GPU (each GPU processes its own shard)
   if (num_gpus > 1) {
@@ -392,47 +394,13 @@ export function calculateVram(input: CalculationInput): CalculationResult {
 
   // Framework overhead (calibrated: ~1GB base + small fraction of non-weight memory)
   let overheadGb = calcFrameworkOverhead(weightsGb, nonWeightGb);
-  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(multiGpuOverheadBaseGb, num_gpus) : 0;
+  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(subtotalGb, num_gpus) : 0;
   if (num_gpus > 1) {
     overheadGb = round2(overheadGb + multiGpuOverheadGb);
   }
 
   // --- Total ---
   const totalUsage = round2(subtotalGb + overheadGb);
-
-  // --- Build breakdown (order matches WASM) ---
-  if (model.architecture === "moe" && model.num_of_expert_params) {
-    breakdown.push({ label: "Shared Backbone Weights", value: round4((sharedWeightsGb / totalUsage) * 100), size_gb: sharedWeightsGb });
-    breakdown.push({ label: "All Expert Weights", value: round4((expertWeightsGb / totalUsage) * 100), size_gb: expertWeightsGb });
-  } else {
-    breakdown.push({ label: "Base Model Weights", value: round4((weightsGb / totalUsage) * 100), size_gb: weightsGb });
-  }
-
-  if (activationsGb > 0) {
-    breakdown.push({ label: "Activations", value: round4((activationsGb / totalUsage) * 100), size_gb: activationsGb });
-  }
-
-  if (isTraining && optimizerGb > 0) {
-    breakdown.push({ label: "Optimizer States", value: round4((optimizerGb / totalUsage) * 100), size_gb: optimizerGb });
-    breakdown.push({ label: "Gradients", value: round4((gradientsGb / totalUsage) * 100), size_gb: gradientsGb });
-    if (tempBuffersGb > 0) {
-      breakdown.push({ label: "Temp Buffers", value: round4((tempBuffersGb / totalUsage) * 100), size_gb: tempBuffersGb });
-    }
-  }
-
-  if (kvCacheTotal > 0) {
-    breakdown.push({ label: "KV Cache", value: round4((kvCacheTotal / totalUsage) * 100), size_gb: kvCacheTotal });
-  }
-
-  if (loraOverheadGb > 0) {
-    breakdown.push({ label: "LoRA Adapters, Optimizer & Gradients", value: round4((loraOverheadGb / totalUsage) * 100), size_gb: loraOverheadGb });
-  }
-
-  if (num_gpus > 1 && multiGpuOverheadGb > 0) {
-    breakdown.push({ label: "Multi-GPU Overhead", value: round4((multiGpuOverheadGb / totalUsage) * 100), size_gb: multiGpuOverheadGb });
-  }
-
-  breakdown.push({ label: "Framework Overhead", value: round4((overheadGb / totalUsage) * 100), size_gb: overheadGb });
 
   // --- Derived ---
   const staticShared = round2(
@@ -444,6 +412,8 @@ export function calculateVram(input: CalculationInput): CalculationResult {
 
   // --- Offloading ---
   let offloadedGb = 0;
+  let offloadedWeightsGb = 0;
+  let offloadedKvGb = 0;
   if (enable_offloading) {
     const layersToOffload =
       num_offload_layers != null
@@ -451,13 +421,57 @@ export function calculateVram(input: CalculationInput): CalculationResult {
         : model.num_of_layers;
     const offloadFraction = layersToOffload / model.num_of_layers;
 
-    offloadedGb = round2(weightsGb * 0.85 * offloadFraction);
+    offloadedWeightsGb = round2(weightsGb * 0.85 * offloadFraction);
     if (offload_kv_cache) {
-      offloadedGb = round2(offloadedGb + kvCacheGb);
+      offloadedKvGb = kvCacheTotal;
+    }
+    offloadedGb = round2(offloadedWeightsGb + offloadedKvGb);
+  }
+
+  const effectiveWeightsGb = round2(Math.max(0, weightsGb - offloadedWeightsGb));
+  const effectiveKvCacheGb = round2(Math.max(0, kvCacheTotal - offloadedKvGb));
+  const effectiveUsage = round2(Math.max(0, totalUsage - offloadedGb));
+  const breakdownTotalGb = Math.max(0.0001, effectiveUsage);
+
+  // --- Build breakdown (post-offload, aligned with displayed effective usage) ---
+  if (model.architecture === "moe" && model.num_of_expert_params) {
+    const shardedSharedGb = num_gpus > 1 ? round2(sharedWeightsGb / num_gpus) : sharedWeightsGb;
+    const shardedExpertGb = num_gpus > 1 ? round2(expertWeightsGb / num_gpus) : expertWeightsGb;
+    const shardedWeightTotalGb = Math.max(0.0001, round2(shardedSharedGb + shardedExpertGb));
+    const sharedRatio = shardedSharedGb / shardedWeightTotalGb;
+    const effectiveSharedGb = round2(effectiveWeightsGb * sharedRatio);
+    const effectiveExpertGb = round2(Math.max(0, effectiveWeightsGb - effectiveSharedGb));
+    breakdown.push({ label: "Shared Backbone Weights", value: round4((effectiveSharedGb / breakdownTotalGb) * 100), size_gb: effectiveSharedGb });
+    breakdown.push({ label: "All Expert Weights", value: round4((effectiveExpertGb / breakdownTotalGb) * 100), size_gb: effectiveExpertGb });
+  } else {
+    breakdown.push({ label: "Base Model Weights", value: round4((effectiveWeightsGb / breakdownTotalGb) * 100), size_gb: effectiveWeightsGb });
+  }
+
+  if (activationsGb > 0) {
+    breakdown.push({ label: "Activations", value: round4((activationsGb / breakdownTotalGb) * 100), size_gb: activationsGb });
+  }
+
+  if (isTraining && optimizerGb > 0) {
+    breakdown.push({ label: "Optimizer States", value: round4((optimizerGb / breakdownTotalGb) * 100), size_gb: optimizerGb });
+    breakdown.push({ label: "Gradients", value: round4((gradientsGb / breakdownTotalGb) * 100), size_gb: gradientsGb });
+    if (tempBuffersGb > 0) {
+      breakdown.push({ label: "Temp Buffers", value: round4((tempBuffersGb / breakdownTotalGb) * 100), size_gb: tempBuffersGb });
     }
   }
 
-  const effectiveUsage = round2(Math.max(0, totalUsage - offloadedGb));
+  if (effectiveKvCacheGb > 0) {
+    breakdown.push({ label: "KV Cache", value: round4((effectiveKvCacheGb / breakdownTotalGb) * 100), size_gb: effectiveKvCacheGb });
+  }
+
+  if (loraOverheadGb > 0) {
+    breakdown.push({ label: "LoRA Adapters, Optimizer & Gradients", value: round4((loraOverheadGb / breakdownTotalGb) * 100), size_gb: loraOverheadGb });
+  }
+
+  if (num_gpus > 1 && multiGpuOverheadGb > 0) {
+    breakdown.push({ label: "Multi-GPU Overhead", value: round4((multiGpuOverheadGb / breakdownTotalGb) * 100), size_gb: multiGpuOverheadGb });
+  }
+
+  breakdown.push({ label: "Framework Overhead", value: round4((overheadGb / breakdownTotalGb) * 100), size_gb: overheadGb });
   // Per GPU percentage; WASM caps at 100
   const perGpuVram = gpuVram;
   const rawPct = round4((effectiveUsage / perGpuVram) * 100);

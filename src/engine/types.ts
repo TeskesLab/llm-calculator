@@ -3,7 +3,7 @@ export interface GpuInfo {
   label: string;
   vendor: string;
   type: string;
-  memory: number;
+  memory: number | null;
   factor: number;
   tdp_watts: number;
   hourly_price_usd: number | null;
@@ -20,6 +20,8 @@ export interface ModelVariant {
   num_of_expert_params?: number;
   num_of_experts?: number;
   num_of_active_experts?: number;
+  num_attention_heads?: number;
+  num_key_value_heads?: number;
   attention_structure: string;
   position_embedding?: string;
   context_length?: number;

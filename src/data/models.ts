@@ -19,6 +19,8 @@ export interface ModelInfo {
   num_of_layers: number;
   num_of_experts: number | null;
   num_of_active_experts: number | null;
+  num_attention_heads: number | null;
+  num_key_value_heads: number | null;
   architecture: string;
   attention_structure: string;
   position_embedding: string;
