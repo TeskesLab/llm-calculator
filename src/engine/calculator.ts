@@ -346,9 +346,12 @@ export function calculateVram(input: CalculationInput): CalculationResult {
   // KV Cache (inference only)
   const kvCacheGb = isTraining ? 0 : calcKvCache(model, seq_length, batch_size, bytesPerKv);
 
-  // KV Cache scales with concurrent users (one per user)
-  const kvCachePerUser = kvCacheGb;
-  const kvCacheTotal = kvCacheGb * Math.max(1, concurrent_users);
+  // KV Cache scales with concurrent users (one cache per user stream).
+  // In multi-GPU inference, KV cache is sharded across devices.
+  const kvCachePerUserTotal = kvCacheGb;
+  const kvCacheTotalUnsharded = kvCacheGb * Math.max(1, concurrent_users);
+  let kvCachePerUser = kvCachePerUserTotal;
+  let kvCacheTotal = kvCacheTotalUnsharded;
 
   // Activations are shared across batched users
   const effectiveBatchSize = isTraining ? batch_size * gradient_accumulation_steps : batch_size;
@@ -382,7 +385,9 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     optimizerGb = round2(optimizerGb / num_gpus);
     gradientsGb = round2(gradientsGb / num_gpus);
     loraOverheadGb = round2(loraOverheadGb / num_gpus);
-    // Activations and KV cache are already per-GPU
+    kvCachePerUser = round2(kvCachePerUser / num_gpus);
+    kvCacheTotal = round2(kvCacheTotal / num_gpus);
+    // Activations are already per-GPU
   }
 
   // Compute subtotal BEFORE overhead to feed into overhead formula
