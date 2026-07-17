@@ -17,11 +17,14 @@ export interface ModelVariant {
   modality?: string;
   hidden_dim_size: number;
   num_of_layers: number;
-  num_of_expert_params?: number;
+  num_of_active_params?: number;
   num_of_experts?: number;
   num_of_active_experts?: number;
   num_attention_heads?: number;
   num_key_value_heads?: number;
+  head_dim?: number;
+  kv_lora_rank?: number;
+  qk_rope_head_dim?: number;
   attention_structure: string;
   position_embedding?: string;
   context_length?: number;

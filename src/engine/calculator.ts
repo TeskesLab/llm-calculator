@@ -26,39 +26,60 @@ function round4(n: number): number {
 // ---------------------------------------------------------------------------
 
 function getNumKvHeads(model: ModelVariant): number {
-  if (model.num_key_value_heads && model.num_key_value_heads > 0) {
+  if (
+    typeof model.num_key_value_heads === "number" &&
+    Number.isFinite(model.num_key_value_heads) &&
+    model.num_key_value_heads > 0
+  ) {
     return model.num_key_value_heads;
   }
 
-  const arch = (model.attention_structure || "mha").toLowerCase();
-  if (arch === "mqa") return 1;
+  const attentionStructure = (model.attention_structure ?? "").toLowerCase();
+  switch (attentionStructure) {
+    case "mqa":
+      return 1;
+    case "gqa":
+      return Math.max(
+        1,
+        Math.floor(
+          model.num_attention_heads && model.num_attention_heads > 0
+            ? model.num_attention_heads / 8
+            : 8,
+        ),
+      );
+    default:
+      return Math.max(
+        1,
+        model.num_attention_heads && model.num_attention_heads > 0
+          ? model.num_attention_heads
+          : 32,
+      );
+  }
+}
 
-  const hiddenDim = model.hidden_dim_size || 4096;
-  // Standard head_dim = 128 for most modern models
-  const headDim = 128;
-  const numQueryHeads = model.num_attention_heads && model.num_attention_heads > 0
-    ? model.num_attention_heads
-    : Math.round(hiddenDim / headDim);
-
-  if (arch === "gqa") {
-    // For GQA, KV heads is typically num_query_heads / num_groups
-    // Common grouping: 4 or 8
-    // We infer from hidden_dim: typical GQA models have explicit kv_heads
-    // Fall back to heuristic
-    return Math.max(1, Math.ceil(numQueryHeads / 4));
+function getKvElementsPerTokenPerLayer(model: ModelVariant): number {
+  if (
+    typeof model.kv_lora_rank === "number" &&
+    Number.isFinite(model.kv_lora_rank) &&
+    model.kv_lora_rank > 0 &&
+    typeof model.qk_rope_head_dim === "number" &&
+    Number.isFinite(model.qk_rope_head_dim) &&
+    model.qk_rope_head_dim >= 0
+  ) {
+    return model.kv_lora_rank + model.qk_rope_head_dim;
   }
 
-  // MLA (DeepSeek-style) uses a compressed KV representation
-  if (arch === "mla") {
-    // MLA reduces KV cache by using a low-rank joint compression
-    // The effective KV dimension is much smaller
-    // DeepSeek-V2 uses q_lora_rank=1536, kv_lora_rank=512
-    // For a 3B model with MLA, the effective per-head KV dim is much smaller
-    return Math.max(1, Math.round(hiddenDim / 128 / 8));
-  }
+  const kvHeads = getNumKvHeads(model);
+  const headDim =
+    typeof model.head_dim === "number" &&
+    Number.isFinite(model.head_dim) &&
+    model.head_dim > 0
+      ? model.head_dim
+      : model.num_attention_heads && model.num_attention_heads > 0
+        ? model.hidden_dim_size / model.num_attention_heads
+        : 128;
 
-  // MHA: same as query heads
-  return numQueryHeads;
+  return 2 * kvHeads * headDim;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,64 +127,50 @@ function calcModelWeights(model: ModelVariant, bytesPerParam: number): number {
   return round2((params * bytesPerParam) / GB);
 }
 
-function calcExpertWeights(model: ModelVariant, bytesPerParam: number): number {
-  const experts = model.num_of_expert_params;
-  if (!experts || experts <= 0) return 0;
-  return round2((experts * 1e9 * bytesPerParam) / GB);
-}
-
-function calcSharedWeights(
-  model: ModelVariant,
-  bytesPerParam: number
-): number {
-  const params = model.num_of_params * 1e9;
-  const experts = (model.num_of_expert_params || 0) * 1e9;
-  const shared = Math.max(0, params - experts);
-  return round2((shared * bytesPerParam) / GB);
-}
-
 function calcKvCache(
   model: ModelVariant,
-  seqLen: number,
+  sequenceLength: number,
   batchSize: number,
-  bytesPerKv: number
+  bytesPerElement: number,
 ): number {
-  const numLayers = model.num_of_layers;
-  const numKvHeads = getNumKvHeads(model);
-  const headDim = 128; // standard head dimension for KV projection
-
-  const size =
-    (2 * numLayers * numKvHeads * headDim * seqLen * batchSize * bytesPerKv) /
-    GB;
-
-  return round2(size);
+  const elements =
+    model.num_of_layers *
+    getKvElementsPerTokenPerLayer(model) *
+    sequenceLength *
+    batchSize;
+  return (elements * bytesPerElement) / GB;
 }
 
 function calcActivations(
   model: ModelVariant,
   seqLen: number,
   batchSize: number,
-  bytesPerElem: number
+  bytesPerElement: number,
+  activationCheckpointing: boolean,
 ): number {
-  const hiddenDim = model.hidden_dim_size;
-  const numLayers = model.num_of_layers;
-
-  // K factor calibrated against WASM:
-  //   For 7B GQA: K≈2.0 gives 0.54GB at seq=1024 (matches WASM exactly)
-  //   For MoE:    K≈2.0 gives 2.15GB at seq=4096
-  //   Formula: batch * seq * hidden * layers * 2 * K / GB
-  const arch = model.architecture?.toLowerCase() || "dense";
-  const attention = (model.attention_structure || "mha").toLowerCase();
-
-  let K = 2.0;
-
-  if (arch === "moe") K *= 0.7;
-  if (attention === "mqa") K *= 0.9;
-  if (attention === "gqa") K *= 0.95;
-  if (attention === "mla") K *= 0.75;
-
+  const architectureFactor =
+    model.architecture.toLowerCase() === "moe" ? 0.7 : 1;
+  const attention = model.attention_structure.toLowerCase();
+  const attentionFactor =
+    attention === "mqa"
+      ? 0.9
+      : attention === "gqa"
+        ? 0.95
+        : attention === "mla" || attention === "dsa"
+          ? 0.75
+          : 1;
+  const checkpointingFactor = activationCheckpointing ? 0.35 : 1;
   const size =
-    (batchSize * seqLen * hiddenDim * numLayers * bytesPerElem * K) / GB;
+    (batchSize *
+      seqLen *
+      model.hidden_dim_size *
+      model.num_of_layers *
+      bytesPerElement *
+      2 *
+      architectureFactor *
+      attentionFactor *
+      checkpointingFactor) /
+    GB;
 
   return round2(size);
 }
@@ -186,30 +193,39 @@ function calcGradients(
 function calcLoRAOverhead(
   model: ModelVariant,
   rank: number,
-  bytesPerParam: number,
-  bytesPerState: number
-): number {
-  // Approximate LoRA adapter parameter count
-  // LoRA adds parameters for attention Q,K,V,O projections + optionally MLP
-  const hiddenDim = model.hidden_dim_size;
-  const numLayers = model.num_of_layers;
-
-  // Per layer: Q(rank*hidden + hidden*rank) + V(rank*hidden + hidden*rank)
-  // = 4 * rank * hidden per layer (for Q and V)
-  const loraParamsPerLayer = 4 * rank * hiddenDim;
-  const totalLoraParams = numLayers * loraParamsPerLayer;
-
-  // LoRA params + optimizer states (2x) + gradients
-  const paramMem = (totalLoraParams * bytesPerParam) / GB;
-  const optMem = (totalLoraParams * 2 * bytesPerState) / GB;
-  const gradMem = (totalLoraParams * bytesPerParam) / GB;
-
-  return round2(paramMem + optMem + gradMem);
+  targetModules: number,
+): { parameters: number; optimizer: number; gradients: number } {
+  const paramsPerLayer =
+    2 * rank * model.hidden_dim_size * targetModules;
+  const totalParams = paramsPerLayer * model.num_of_layers;
+  return {
+    parameters: (totalParams * 2) / GB,
+    optimizer: (totalParams * 8) / GB,
+    gradients: (totalParams * 2) / GB,
+  };
 }
 
-function calcFrameworkOverhead(_weightsGb: number, extraGb: number): number {
-  // Wasm-calibrated: ~1GB base + small percentage of non-weight memory
-  return round2(1.0 + (extraGb * 0.005));
+function calcFrameworkOverhead(memoryGb: number): number {
+  return round2(1 + memoryGb * 0.005);
+}
+
+function getZeroStage(config: CalculationInput["optimization_config"]): 0 | 2 | 3 {
+  if (config?.zero_stage === 2 || config?.zero_stage === 3) {
+    return config.zero_stage;
+  }
+
+  const preset = config?.preset;
+  switch (preset) {
+    case undefined:
+    case "default":
+      return 0;
+    case "zero2":
+      return 2;
+    case "zero3":
+      return 3;
+    default:
+      throw new Error(`Unsupported optimization preset: ${preset}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,71 +240,52 @@ function estimateTps(
   gpuKey: string,
   numGpus: number,
   interconnect: string | null,
-  isTraining: boolean
+  isTraining: boolean,
 ): {
   latencyTps: number;
   throughputTps: number;
   perUserTps: number;
-  concurrentUsers: number;
   msPerToken: number;
   tftt: number;
 } {
-  const factor = getGpuFactor(gpuKey);
-  const eff = getInterconnectEfficiency(interconnect, numGpus);
+  const activeModelParams = model.num_of_active_params ?? model.num_of_params;
+  let baseTps = 25 * Math.pow(7 / activeModelParams, 0.85);
 
-  // Baseline: RTX 3060 (factor=1.0, ~360 GB/s bandwidth) on 7B FP16
-  // Real-world llama.cpp: ~20-30 tok/s for 7B Q4, ~15-20 for 7B FP16
-  const baseParams = 7;
-  const modelParams = model.num_of_params;
-  const paramScale = baseParams / modelParams;
-  const precisionScale = 2.0 / bytesPerParam;
-
-  let baseTps = 20 * paramScale * precisionScale;
-
-  // Adjust for attention structure
-  const attention = (model.attention_structure || "mha").toLowerCase();
-  if (attention === "gqa") baseTps *= 1.1;
-  if (attention === "mqa") baseTps *= 1.15;
-  if (attention === "mla") baseTps *= 1.05; // MLA has compute overhead
-
-  // MoE: fewer active params per token → faster inference
-  if (model.architecture === "moe") {
-    const active = model.num_of_active_experts || 2;
-    const total = model.num_of_experts || 8;
-    // Speedup roughly: total_params / active_params
-    const moeSpeedup = Math.min(3, total / Math.max(1, active));
-    baseTps *= moeSpeedup * 0.7; // 0.7 dampening for routing overhead
+  if (
+    model.num_of_active_params &&
+    model.num_of_active_params < model.num_of_params
+  ) {
+    baseTps *= 0.7;
   }
 
-  // Sequence length effect: longer sequences = more compute per token
+  baseTps *=
+    bytesPerParam <= 0.5 ? 2.2 : bytesPerParam <= 1 ? 1.8 : 1.0;
+
   if (seqLen > 1024) {
-    baseTps *= Math.pow(1024 / seqLen, 0.15); // mild penalty
+    baseTps *= Math.pow(1024 / seqLen, 0.15);
   }
 
-  // Apply GPU factor and multi-GPU scaling
-  const singleGpuTps = baseTps * factor;
-  const rawTps = singleGpuTps * (1 + (numGpus - 1) * eff);
-
-  // Training overhead: ~3x slower per token due to backward pass
-  const speedMultiplier = isTraining ? 1 / 3 : 1;
-  const latencyTps = round4(rawTps * speedMultiplier);
-
-  // Throughput = latency * batch_size (but sub-linear scaling for large batches)
-  const batchEfficiency = Math.pow(batchSize, 0.85);
-  const throughputTps = round4(latencyTps * batchEfficiency);
-
-  // Per-user TPS
-  const concurrentUsers = 1; // used for the TPS calc
-  const perUserTps = round4(latencyTps / concurrentUsers);
-
-  // Time per token (ms)
+  const gpuFactor = getGpuFactor(gpuKey);
+  const interconnectEfficiency = getInterconnectEfficiency(
+    interconnect,
+    numGpus,
+  );
+  const singleGpuTps = baseTps * gpuFactor;
+  const rawTps =
+    singleGpuTps * (1 + (numGpus - 1) * interconnectEfficiency);
+  const latencyTps = round4(rawTps * (isTraining ? 1 / 3 : 1));
+  const throughputTps = round4(
+    latencyTps * Math.pow(Math.max(1, batchSize), 0.85),
+  );
   const msPerToken = latencyTps > 0 ? round4(1000 / latencyTps) : 0;
 
-  // Time to First Token — prompt is processed in one parallel forward pass
-  // TTFT ~= time for ~15 "effective tokens" of compute (heuristic)
-  const tftt = msPerToken > 0 ? Math.round(msPerToken * 15) : 0;
-
-  return { latencyTps, throughputTps, perUserTps, concurrentUsers, msPerToken, tftt };
+  return {
+    latencyTps,
+    throughputTps,
+    perUserTps: latencyTps,
+    msPerToken,
+    tftt: msPerToken > 0 ? Math.round(msPerToken * 15) : 0,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -312,8 +309,11 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     concurrent_users,
     gradient_accumulation_steps,
     enable_offloading,
-    offload_kv_cache,
+    offload_target,
     num_offload_layers,
+    percentage_offload,
+    offload_kv_cache,
+    optimization_config,
     carbon_intensity,
     interconnect_type,
     num_samples,
@@ -322,270 +322,234 @@ export function calculateVram(input: CalculationInput): CalculationResult {
     energy_cost_per_kwh,
   } = input;
 
-  const bytesPerParam = getBytesPerParam(quantization);
-  const bytesPerKv = getKvCacheBytes(kv_cache_quantization);
+  const gpuCount = Math.max(1, num_gpus);
+  const batchSize = Math.max(1, batch_size);
+  const sequenceLength = Math.max(1, seq_length);
+  const userCount = Math.max(1, concurrent_users);
   const isTraining = calc_mode === "finetuning";
-  const gpuVram = getEffectiveVram(gpu_key, custom_vram);
+  const weightQuantization = isTraining
+    ? finetuning_method === "qlora"
+      ? "q4"
+      : fine_tuning_quantization || "fp16"
+    : quantization;
+  const bytesPerParam = getBytesPerParam(weightQuantization);
+  const bytesPerKv = getKvCacheBytes(kv_cache_quantization);
 
-  // --- Memory breakdown ---
-  const breakdown: MemoryBreakdownItem[] = [];
+  let weightsGb = calcModelWeights(model, bytesPerParam);
+  let kvCachePerUserGb = isTraining
+    ? 0
+    : calcKvCache(model, sequenceLength, batchSize, bytesPerKv);
+  let kvCacheGb = kvCachePerUserGb * userCount;
+  const activationsGb = calcActivations(
+    model,
+    sequenceLength,
+    batchSize,
+    isTraining && finetuning_method === "full" ? bytesPerParam : 2,
+    optimization_config?.gradient_checkpointing ?? false,
+  );
 
-  // Model weights
-  let weightsGb: number;
-  let sharedWeightsGb = 0;
-  let expertWeightsGb = 0;
-
-  if (model.architecture === "moe" && model.num_of_expert_params) {
-    sharedWeightsGb = calcSharedWeights(model, bytesPerParam);
-    expertWeightsGb = calcExpertWeights(model, bytesPerParam);
-    weightsGb = round2(sharedWeightsGb + expertWeightsGb);
-  } else {
-    weightsGb = calcModelWeights(model, bytesPerParam);
-  }
-
-  // KV Cache (inference only)
-  const kvCacheGb = isTraining ? 0 : calcKvCache(model, seq_length, batch_size, bytesPerKv);
-
-  // KV Cache scales with concurrent users (one cache per user stream).
-  // In multi-GPU inference, KV cache is sharded across devices.
-  const kvCachePerUserTotal = kvCacheGb;
-  const kvCacheTotalUnsharded = kvCacheGb * Math.max(1, concurrent_users);
-  let kvCachePerUser = kvCachePerUserTotal;
-  let kvCacheTotal = kvCacheTotalUnsharded;
-
-  // Activations are shared across batched users
-  const effectiveBatchSize = isTraining ? batch_size * gradient_accumulation_steps : batch_size;
-  const activationsGb = calcActivations(model, seq_length, effectiveBatchSize, bytesPerParam);
-
-  // Optimizer + Gradients (training)
   let optimizerGb = 0;
   let gradientsGb = 0;
-  let loraOverheadGb = 0;
-  let tempBuffersGb = 0;
+  let loraParametersGb = 0;
+  let loraOptimizerGb = 0;
+  let loraGradientsGb = 0;
 
-  if (isTraining) {
-    const trainableParams = model.num_of_params;
-    const ftBytes = getBytesPerParam(fine_tuning_quantization || "fp16");
+  if (isTraining && finetuning_method === "full") {
+    optimizerGb = calcOptimizerStates(model.num_of_params, 4);
+    gradientsGb = calcGradients(model.num_of_params, bytesPerParam);
+  } else if (
+    isTraining &&
+    (finetuning_method === "lora" || finetuning_method === "qlora")
+  ) {
+    const lora = calcLoRAOverhead(model, Math.max(1, lora_rank ?? 8), 4);
+    loraParametersGb = lora.parameters;
+    loraOptimizerGb = lora.optimizer;
+    loraGradientsGb = lora.gradients;
+  }
 
-    if (finetuning_method === "lora" || finetuning_method === "qlora") {
-      const baseQuant = finetuning_method === "qlora" ? "q4" : quantization;
-      weightsGb = calcModelWeights(model, getBytesPerParam(baseQuant));
-      loraOverheadGb = calcLoRAOverhead(model, lora_rank || 16, ftBytes, 4);
-    } else {
-      optimizerGb = calcOptimizerStates(trainableParams, 4);
-      gradientsGb = calcGradients(trainableParams, ftBytes);
-      tempBuffersGb = round2(activationsGb * 0.3);
+  const zeroStage = isTraining ? getZeroStage(optimization_config) : 0;
+  if (gpuCount > 1) {
+    if (!isTraining || zeroStage === 3) {
+      weightsGb /= gpuCount;
+      loraParametersGb /= gpuCount;
+    }
+    if (!isTraining || zeroStage >= 2) {
+      optimizerGb /= gpuCount;
+      gradientsGb /= gpuCount;
+      loraOptimizerGb /= gpuCount;
+      loraGradientsGb /= gpuCount;
+    }
+    if (!isTraining) {
+      kvCachePerUserGb /= gpuCount;
+      kvCacheGb /= gpuCount;
     }
   }
 
-  // Multi-GPU: shard model weights, optimizer states, and gradients across GPUs
-  // KV cache and activations stay per-GPU (each GPU processes its own shard)
-  if (num_gpus > 1) {
-    weightsGb = round2(weightsGb / num_gpus);
-    optimizerGb = round2(optimizerGb / num_gpus);
-    gradientsGb = round2(gradientsGb / num_gpus);
-    loraOverheadGb = round2(loraOverheadGb / num_gpus);
-    kvCachePerUser = round2(kvCachePerUser / num_gpus);
-    kvCacheTotal = round2(kvCacheTotal / num_gpus);
-    // Activations are already per-GPU
-  }
-
-  // Compute subtotal BEFORE overhead to feed into overhead formula
-  const subtotalGb = round2(
-    weightsGb + kvCacheTotal + activationsGb + optimizerGb +
-    gradientsGb + loraOverheadGb + tempBuffersGb
-  );
-  const nonWeightGb = subtotalGb - weightsGb;
-
-  // Framework overhead (calibrated: ~1GB base + small fraction of non-weight memory)
-  let overheadGb = calcFrameworkOverhead(weightsGb, nonWeightGb);
-  const multiGpuOverheadGb = num_gpus > 1 ? getMultiGpuOverhead(subtotalGb, num_gpus) : 0;
-  if (num_gpus > 1) {
-    overheadGb = round2(overheadGb + multiGpuOverheadGb);
-  }
-
-  // --- Total ---
-  const totalUsage = round2(subtotalGb + overheadGb);
-
-  // --- Derived ---
-  const staticShared = round2(
-    weightsGb + optimizerGb + gradientsGb + loraOverheadGb + overheadGb
-  );
-  const perUserMemory = round2(
-    kvCachePerUser + (activationsGb / Math.max(1, concurrent_users))
-  );
-
-  // --- Offloading ---
-  let offloadedGb = 0;
   let offloadedWeightsGb = 0;
-  let offloadedKvGb = 0;
+  let offloadedKvCacheGb = 0;
   if (enable_offloading) {
-    const layersToOffload =
-      num_offload_layers != null
-        ? Math.min(num_offload_layers, model.num_of_layers)
-        : model.num_of_layers;
-    const offloadFraction = layersToOffload / model.num_of_layers;
-
-    offloadedWeightsGb = round2(weightsGb * 0.85 * offloadFraction);
-    if (offload_kv_cache) {
-      offloadedKvGb = kvCacheTotal;
-    }
-    offloadedGb = round2(offloadedWeightsGb + offloadedKvGb);
-  }
-
-  const effectiveWeightsGb = round2(Math.max(0, weightsGb - offloadedWeightsGb));
-  const effectiveKvCacheGb = round2(Math.max(0, kvCacheTotal - offloadedKvGb));
-  const effectiveUsage = round2(Math.max(0, totalUsage - offloadedGb));
-  const breakdownTotalGb = Math.max(0.0001, effectiveUsage);
-
-  // --- Build breakdown (post-offload, aligned with displayed effective usage) ---
-  if (model.architecture === "moe" && model.num_of_expert_params) {
-    const shardedSharedGb = num_gpus > 1 ? round2(sharedWeightsGb / num_gpus) : sharedWeightsGb;
-    const shardedExpertGb = num_gpus > 1 ? round2(expertWeightsGb / num_gpus) : expertWeightsGb;
-    const shardedWeightTotalGb = Math.max(0.0001, round2(shardedSharedGb + shardedExpertGb));
-    const sharedRatio = shardedSharedGb / shardedWeightTotalGb;
-    const effectiveSharedGb = round2(effectiveWeightsGb * sharedRatio);
-    const effectiveExpertGb = round2(Math.max(0, effectiveWeightsGb - effectiveSharedGb));
-    breakdown.push({ label: "Shared Backbone Weights", value: round4((effectiveSharedGb / breakdownTotalGb) * 100), size_gb: effectiveSharedGb });
-    breakdown.push({ label: "All Expert Weights", value: round4((effectiveExpertGb / breakdownTotalGb) * 100), size_gb: effectiveExpertGb });
-  } else {
-    breakdown.push({ label: "Base Model Weights", value: round4((effectiveWeightsGb / breakdownTotalGb) * 100), size_gb: effectiveWeightsGb });
-  }
-
-  if (activationsGb > 0) {
-    breakdown.push({ label: "Activations", value: round4((activationsGb / breakdownTotalGb) * 100), size_gb: activationsGb });
-  }
-
-  if (isTraining && optimizerGb > 0) {
-    breakdown.push({ label: "Optimizer States", value: round4((optimizerGb / breakdownTotalGb) * 100), size_gb: optimizerGb });
-    breakdown.push({ label: "Gradients", value: round4((gradientsGb / breakdownTotalGb) * 100), size_gb: gradientsGb });
-    if (tempBuffersGb > 0) {
-      breakdown.push({ label: "Temp Buffers", value: round4((tempBuffersGb / breakdownTotalGb) * 100), size_gb: tempBuffersGb });
+    const requestedFraction =
+      num_offload_layers !== null
+        ? num_offload_layers / Math.max(1, model.num_of_layers)
+        : percentage_offload !== null
+          ? percentage_offload / 100
+          : 1;
+    const offloadFraction = Math.max(0, Math.min(1, requestedFraction));
+    offloadedWeightsGb = weightsGb * offloadFraction;
+    if (!isTraining && offload_kv_cache) {
+      offloadedKvCacheGb = kvCacheGb;
     }
   }
 
-  if (effectiveKvCacheGb > 0) {
-    breakdown.push({ label: "KV Cache", value: round4((effectiveKvCacheGb / breakdownTotalGb) * 100), size_gb: effectiveKvCacheGb });
-  }
+  const residentWeightsGb = weightsGb - offloadedWeightsGb;
+  const residentKvCacheGb = kvCacheGb - offloadedKvCacheGb;
+  const loraOverheadGb =
+    loraParametersGb + loraOptimizerGb + loraGradientsGb;
+  const componentMemoryGb =
+    residentWeightsGb +
+    residentKvCacheGb +
+    activationsGb +
+    optimizerGb +
+    gradientsGb +
+    loraOverheadGb;
+  const frameworkOverheadGb = calcFrameworkOverhead(componentMemoryGb);
+  const multiGpuOverheadGb = getMultiGpuOverhead(
+    componentMemoryGb,
+    gpuCount,
+  );
+  const allocatedVramGb =
+    componentMemoryGb + frameworkOverheadGb + multiGpuOverheadGb;
+  const effectiveUsage = allocatedVramGb / 0.9;
+  const reservedHeadroomGb = effectiveUsage - allocatedVramGb;
 
-  if (loraOverheadGb > 0) {
-    breakdown.push({ label: "LoRA Adapters, Optimizer & Gradients", value: round4((loraOverheadGb / breakdownTotalGb) * 100), size_gb: loraOverheadGb });
-  }
+  const breakdownParts: Array<{ label: string; sizeGb: number }> = [
+    { label: "Model Weights", sizeGb: residentWeightsGb },
+    { label: "KV Cache", sizeGb: residentKvCacheGb },
+    { label: "Activations", sizeGb: activationsGb },
+    { label: "Optimizer States", sizeGb: optimizerGb },
+    { label: "Gradients", sizeGb: gradientsGb },
+    { label: "LoRA Parameters & States", sizeGb: loraOverheadGb },
+    { label: "Framework Overhead", sizeGb: frameworkOverheadGb },
+    { label: "Multi-GPU Overhead", sizeGb: multiGpuOverheadGb },
+    { label: "Reserved Headroom", sizeGb: reservedHeadroomGb },
+  ];
+  const breakdown: MemoryBreakdownItem[] = breakdownParts
+    .filter((part) => part.sizeGb > 0)
+    .map((part) => ({
+      label: part.label,
+      value: round4((part.sizeGb / effectiveUsage) * 100),
+      size_gb: round4(part.sizeGb),
+    }));
 
-  if (num_gpus > 1 && multiGpuOverheadGb > 0) {
-    breakdown.push({ label: "Multi-GPU Overhead", value: round4((multiGpuOverheadGb / breakdownTotalGb) * 100), size_gb: multiGpuOverheadGb });
-  }
-
-  breakdown.push({ label: "Framework Overhead", value: round4((overheadGb / breakdownTotalGb) * 100), size_gb: overheadGb });
-  // Per GPU percentage; WASM caps at 100
-  const perGpuVram = gpuVram;
-  const rawPct = round4((effectiveUsage / perGpuVram) * 100);
-  const rawActualPct = round4((totalUsage / perGpuVram) * 100);
-  const vramPct = Math.min(100, rawPct);
-  const actualPct = Math.min(100, rawActualPct);
-
-  // Memory status based on effective per-GPU usage (after offloading).
-  // This aligns status with the displayed usage/progress.
-  //   "Sufficient" < ~50%, "Okay" < ~65%, "Moderate" < ~80%, "High" < ~95%, "Insufficient"
+  const perGpuVram = getEffectiveVram(gpu_key, custom_vram);
+  const vramPercentage = (effectiveUsage / perGpuVram) * 100;
+  const actualVramPercentage = (allocatedVramGb / perGpuVram) * 100;
   let memoryStatus: string;
-  if (rawPct >= 95 || effectiveUsage >= perGpuVram) memoryStatus = "Insufficient";
-  else if (rawPct >= 80) memoryStatus = "High";
-  else if (rawPct >= 65) memoryStatus = "Moderate";
-  else if (rawPct >= 50) memoryStatus = "Okay";
+  if (vramPercentage >= 95) memoryStatus = "Insufficient";
+  else if (vramPercentage >= 80) memoryStatus = "High";
+  else if (vramPercentage >= 65) memoryStatus = "Moderate";
+  else if (vramPercentage >= 50) memoryStatus = "Okay";
   else memoryStatus = "Sufficient";
 
-  // --- Performance ---
-  const perf = estimateTps(
+  const performance = estimateTps(
     model,
     bytesPerParam,
-    seq_length,
-    batch_size,
+    sequenceLength,
+    batchSize,
     gpu_key,
-    num_gpus,
+    gpuCount,
     interconnect_type,
-    isTraining
+    isTraining,
   );
+  const inferenceThroughput = isTraining
+    ? performance.throughputTps
+    : round4(performance.latencyTps * Math.pow(userCount, 0.7));
+  const inferencePerUser = isTraining
+    ? performance.perUserTps
+    : round4(performance.latencyTps / userCount);
 
-  // --- Power draw ---
   const tdp = getGpuTdp(gpu_key);
-  const tdpUtilization = Math.min(1, actualPct / 100);
-  const powerDraw = Math.round(tdp * num_gpus * (0.3 + 0.7 * tdpUtilization));
+  const tdpUtilization = Math.min(1, actualVramPercentage / 100);
+  const powerDraw = Math.round(
+    tdp * gpuCount * (0.3 + 0.7 * tdpUtilization),
+  );
+  const aggregateOffloadedGb =
+    (offloadedWeightsGb + offloadedKvCacheGb) * gpuCount;
+  const cpuOffloadedGb =
+    enable_offloading && offload_target !== "nvme"
+      ? aggregateOffloadedGb
+      : 0;
+  const systemRamGb =
+    allocatedVramGb * gpuCount * 0.2 + cpuOffloadedGb + 4;
 
-  // --- System RAM ---
-  const systemRam = round2(effectiveUsage * 1.2 + 4);
-
-  // --- Carbon emissions ---
   let carbonPerHour: number | undefined;
   let carbonPerDay: number | undefined;
   let carbonPerMonth: number | undefined;
   let carbonPerYear: number | undefined;
-
-  if (carbon_intensity != null && carbon_intensity > 0) {
-    const powerKw = powerDraw / 1000;
-    carbonPerHour = round4(powerKw * carbon_intensity / 1000); // kg CO2
+  if (carbon_intensity !== null && carbon_intensity > 0) {
+    carbonPerHour = round4((powerDraw / 1000) * (carbon_intensity / 1000));
     carbonPerDay = round4(carbonPerHour * 24);
     carbonPerMonth = round4(carbonPerDay * 30);
     carbonPerYear = round4(carbonPerDay * 365);
   }
 
-  // --- Training-specific metrics & Energy cost ---
   let trainingTps: number | undefined;
-  let samplesPerSec: number | undefined;
-  let stepsPerSec: number | undefined;
+  let samplesPerSecond: number | undefined;
+  let stepsPerSecond: number | undefined;
   let totalTokens: number | undefined;
   let totalTrainingTimeHours: number | undefined;
-  let energyCostPerHour: number | undefined;
-  let energyCostTotal: number | undefined;
-
-  if (isTraining && num_samples && tokens_per_sample && num_epochs) {
-    trainingTps = perf.latencyTps;
-    const tokensPerStep = effectiveBatchSize * seq_length;
-    stepsPerSec = trainingTps / tokensPerStep;
-    const secsPerStep = 1 / Math.max(stepsPerSec, 0.0001);
-    samplesPerSec = round4(effectiveBatchSize / secsPerStep);
-
-    totalTokens = num_samples * tokens_per_sample * num_epochs;
-    const totalSteps = Math.ceil(
-      (num_samples * num_epochs) / effectiveBatchSize
-    );
-    totalTrainingTimeHours = round4((totalSteps * secsPerStep) / 3600);
+  if (
+    isTraining &&
+    num_samples !== null &&
+    tokens_per_sample !== null &&
+    num_epochs !== null
+  ) {
+    const sampleTokens = Math.max(1, tokens_per_sample);
+    trainingTps = performance.throughputTps;
+    samplesPerSecond = round4(trainingTps / sampleTokens);
+    const effectiveGlobalBatch =
+      batchSize *
+      Math.max(1, gradient_accumulation_steps) *
+      gpuCount;
+    stepsPerSecond = round4(samplesPerSecond / effectiveGlobalBatch);
+    totalTokens = num_samples * sampleTokens * num_epochs;
+    totalTrainingTimeHours = round4(totalTokens / trainingTps / 3600);
   }
 
-  if (energy_cost_per_kwh != null && energy_cost_per_kwh > 0) {
-    const powerKw = powerDraw / 1000;
-    energyCostPerHour = round4(powerKw * energy_cost_per_kwh * num_gpus);
-    if (totalTrainingTimeHours != null) {
-      energyCostTotal = round4(energyCostPerHour * totalTrainingTimeHours);
+  let energyCostPerHour: number | undefined;
+  let energyCostTotal: number | undefined;
+  if (energy_cost_per_kwh !== null && energy_cost_per_kwh > 0) {
+    energyCostPerHour = round4(
+      (powerDraw / 1000) * energy_cost_per_kwh,
+    );
+    if (totalTrainingTimeHours !== undefined) {
+      energyCostTotal = round4(
+        energyCostPerHour * totalTrainingTimeHours,
+      );
     }
   }
 
-  // Apply concurrent users to throughput for inference
-  const inferenceThroughput = isTraining
-    ? perf.throughputTps
-    : round4(perf.latencyTps * Math.pow(concurrent_users, 0.7));
-  const inferencePerUser = isTraining
-    ? perf.perUserTps
-    : round4(perf.latencyTps / Math.max(1, concurrent_users));
-
   return {
-    vram_usage: effectiveUsage,
-    vram_percentage: vramPct,
-    actual_vram_percentage: actualPct,
+    vram_usage: round4(effectiveUsage),
+    vram_percentage: round4(vramPercentage),
+    actual_vram_percentage: round4(actualVramPercentage),
     memory_status: memoryStatus,
     memory_breakdown: breakdown,
-    static_shared_memory: staticShared,
-    per_user_memory: perUserMemory,
-    offloaded_memory: offloadedGb,
-    estimated_latency_tps: perf.latencyTps,
+    static_shared_memory: round4(effectiveUsage - residentKvCacheGb),
+    per_user_memory: round4(
+      kvCachePerUserGb + activationsGb / userCount,
+    ),
+    offloaded_memory: round4(offloadedWeightsGb + offloadedKvCacheGb),
+    estimated_latency_tps: performance.latencyTps,
     estimated_throughput_tps: inferenceThroughput,
     per_user_tps: inferencePerUser,
-    ms_per_token: perf.msPerToken,
-    tftt: perf.tftt,
+    ms_per_token: performance.msPerToken,
+    tftt: performance.tftt,
     estimated_power_draw: powerDraw,
-    estimated_system_ram_required: systemRam,
+    estimated_system_ram_required: round4(systemRamGb),
     training_tps: trainingTps,
-    samples_per_second: samplesPerSec,
-    steps_per_second: stepsPerSec,
+    samples_per_second: samplesPerSecond,
+    steps_per_second: stepsPerSecond,
     total_tokens: totalTokens,
     total_training_time_hours: totalTrainingTimeHours,
     carbon_emissions_per_hour: carbonPerHour,

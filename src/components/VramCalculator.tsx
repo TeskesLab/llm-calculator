@@ -106,12 +106,9 @@ const INTERCONNECT_OPTIONS = [
 ];
 
 const OPTIMIZATION_PRESETS = [
-  { value: "unsloth", label: "Unsloth" },
+  { value: "default", label: "Default (Data Parallel)" },
   { value: "deepspeed_zero2", label: "DeepSpeed ZeRO-2" },
   { value: "deepspeed_zero3", label: "DeepSpeed ZeRO-3" },
-  { value: "peft_minimal", label: "PEFT Minimal" },
-  { value: "default", label: "Default" },
-  { value: "custom", label: "Custom" },
 ];
 
 const PIE_COLORS = [
@@ -242,12 +239,15 @@ export function VramCalculator() {
           modality: selectedModel.modality || "text",
           hidden_dim_size: selectedModel.hidden_dim_size ?? 4096,
           num_of_layers: selectedModel.num_of_layers ?? 32,
-          num_of_expert_params: selectedModel.num_of_expert_params || 0,
+          num_of_active_params: selectedModel.num_of_active_params || undefined,
           num_of_experts: selectedModel.num_of_experts || undefined,
           num_of_active_experts: selectedModel.num_of_active_experts || undefined,
           attention_structure: selectedModel.attention_structure,
           num_attention_heads: selectedModel.num_attention_heads || undefined,
           num_key_value_heads: selectedModel.num_key_value_heads || undefined,
+          head_dim: selectedModel.head_dim || undefined,
+          kv_lora_rank: selectedModel.kv_lora_rank || undefined,
+          qk_rope_head_dim: selectedModel.qk_rope_head_dim || undefined,
           position_embedding: selectedModel.position_embedding,
         },
         quantization,
@@ -272,7 +272,7 @@ export function VramCalculator() {
         enable_offloading: enableOffloading,
         offload_target: enableOffloading ? offloadTarget : null,
         num_offload_layers:
-          enableOffloading && numOffloadLayers ? numOffloadLayers : null,
+          enableOffloading && numOffloadLayers !== null ? numOffloadLayers : null,
         percentage_offload: null,
         offload_kv_cache: offloadKvCache,
         optimization_config:

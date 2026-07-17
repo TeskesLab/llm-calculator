@@ -25,7 +25,10 @@ export interface ModelInfo {
   attention_structure: string;
   position_embedding: string;
   context_length: number;
-  num_of_expert_params: number | null;
+  num_of_active_params: number | null;
+  head_dim?: number | null;
+  kv_lora_rank?: number | null;
+  qk_rope_head_dim?: number | null;
   additional_notes?: string | null;
 }
 
