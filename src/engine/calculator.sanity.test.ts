@@ -376,8 +376,8 @@ describe("calculator sanity", () => {
       ["minimax-m27", "229.00", 10, 204800],
       ["minimax-m3", "428.00", 23, 1048576],
       ["mistral-medium-35-128b", "128.00", null, 262144],
-      ["mistral-small-4-119b-a6b", "119.00", 6.5, 262144],
-      ["nvidia-nemotron-3-super-120b-a12b", "120.00", 12, 1048576],
+      ["mistral-small-4-119b-a6b", "119.00", 6.5, 1048576],
+      ["nvidia-nemotron-3-super-120b-a12b", "120.00", 12, 262144],
       ["qwen3-coder-next-80b-a3b", "80.00", 3, 262144],
       ["qwen36-27b", "27.00", null, 262144],
     ] as const;
@@ -398,6 +398,80 @@ describe("calculator sanity", () => {
         parseFloat(model.num_of_params),
       );
     }
+  });
+
+  it("keeps released model architecture metadata complete", () => {
+    for (const model of models) {
+      if (model.release_date === null) continue;
+
+      expect(model.ffn_intermediate_size, `${model.slug}.ffn_intermediate_size`).not.toBeNull();
+      expect(model.vocab_size, `${model.slug}.vocab_size`).not.toBeNull();
+      expect(model.num_attention_heads, `${model.slug}.num_attention_heads`).not.toBeNull();
+      expect(model.num_key_value_heads, `${model.slug}.num_key_value_heads`).not.toBeNull();
+      expect(model.head_dim, `${model.slug}.head_dim`).not.toBeNull();
+
+      if (model.architecture === "moe") {
+        expect(model.num_of_experts, `${model.slug}.num_of_experts`).not.toBeNull();
+        expect(model.num_of_active_experts, `${model.slug}.num_of_active_experts`).not.toBeNull();
+      }
+    }
+  });
+
+  it("loads source-verified legacy architecture metadata", () => {
+    expect(getModelBySlug("chatglm2-6b")).toMatchObject({
+      attention_structure: "gqa",
+      num_attention_heads: 32,
+      num_key_value_heads: 2,
+      position_embedding: "rope",
+    });
+    expect(getModelBySlug("falcon-7b")).toMatchObject({
+      hidden_dim_size: 4544,
+      ffn_intermediate_size: 18176,
+      num_of_layers: 32,
+      attention_structure: "mqa",
+      head_dim: 64,
+    });
+    expect(getModelBySlug("gemma-3n-e2b-it")).toMatchObject({
+      hidden_dim_size: 2048,
+      ffn_intermediate_size: 8192,
+      architecture: "dense",
+      modality: "multimodal",
+      num_attention_heads: 8,
+      num_key_value_heads: 2,
+    });
+    expect(getModelBySlug("glm-130b")).toMatchObject({
+      ffn_intermediate_size: 32768,
+      vocab_size: 150528,
+      num_attention_heads: 96,
+      num_key_value_heads: 96,
+      position_embedding: "rope",
+    });
+    expect(getModelBySlug("hunyuan-standard")).toMatchObject({
+      hidden_dim_size: 6400,
+      ffn_intermediate_size: 18304,
+      num_of_layers: 64,
+      num_of_experts: 16,
+      num_of_active_experts: 1,
+      context_length: 131072,
+    });
+    expect(getModelBySlug("mistral-large-3")).toMatchObject({
+      hidden_dim_size: 7168,
+      ffn_intermediate_size: 4096,
+      vocab_size: 131072,
+      num_of_layers: 61,
+      num_of_experts: 128,
+      num_of_active_experts: 4,
+      context_length: 294912,
+      attention_structure: "mla",
+    });
+  });
+
+  it("does not advertise unreleased preview weights", () => {
+    expect(getModelBySlug("llama-4-behemoth")).toMatchObject({
+      release_date: null,
+      open_weights: false,
+      link_weights: null,
+    });
   });
 
 });
