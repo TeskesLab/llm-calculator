@@ -17,6 +17,7 @@ export interface ModelInfo {
   ffn_intermediate_size: number | null;
   vocab_size: number | null;
   num_of_layers: number;
+  num_kv_cache_layers?: number | null;
   num_of_experts: number | null;
   num_of_active_experts: number | null;
   num_attention_heads: number | null;

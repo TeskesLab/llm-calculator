@@ -17,6 +17,7 @@ export interface ModelVariant {
   modality?: string;
   hidden_dim_size: number;
   num_of_layers: number;
+  num_kv_cache_layers?: number;
   num_of_active_params?: number;
   num_of_experts?: number;
   num_of_active_experts?: number;

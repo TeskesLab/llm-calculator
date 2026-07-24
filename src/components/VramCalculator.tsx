@@ -239,6 +239,7 @@ export function VramCalculator() {
           modality: selectedModel.modality || "text",
           hidden_dim_size: selectedModel.hidden_dim_size ?? 4096,
           num_of_layers: selectedModel.num_of_layers ?? 32,
+          num_kv_cache_layers: selectedModel.num_kv_cache_layers || undefined,
           num_of_active_params: selectedModel.num_of_active_params || undefined,
           num_of_experts: selectedModel.num_of_experts || undefined,
           num_of_active_experts: selectedModel.num_of_active_experts || undefined,

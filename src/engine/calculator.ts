@@ -134,7 +134,7 @@ function calcKvCache(
   bytesPerElement: number,
 ): number {
   const elements =
-    model.num_of_layers *
+    (model.num_kv_cache_layers ?? model.num_of_layers) *
     getKvElementsPerTokenPerLayer(model) *
     sequenceLength *
     batchSize;

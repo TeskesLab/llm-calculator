@@ -5,7 +5,7 @@ import {
   type CalculationResult,
   type ModelVariant,
 } from "./index";
-import { getModelBySlug } from "../data/models";
+import { getModelBySlug, models } from "../data/models";
 
 function baseInput(overrides: Partial<CalculationInput> = {}): CalculationInput {
   const model = getModelBySlug("deepseek-v4-flash");
@@ -18,6 +18,7 @@ function baseInput(overrides: Partial<CalculationInput> = {}): CalculationInput 
       modality: model.modality || "text",
       hidden_dim_size: model.hidden_dim_size ?? 4096,
       num_of_layers: model.num_of_layers ?? 32,
+      num_kv_cache_layers: model.num_kv_cache_layers || undefined,
       num_of_active_params: model.num_of_active_params || undefined,
       num_of_experts: model.num_of_experts || undefined,
       num_of_active_experts: model.num_of_active_experts || undefined,
@@ -297,6 +298,40 @@ describe("calculator sanity", () => {
     );
   });
 
+  it("sizes KV cache only for cache-bearing hybrid layers", () => {
+    const model = getModelBySlug("qwen3-coder-next-80b-a3b");
+    if (!model) throw new Error("Model qwen3-coder-next-80b-a3b not found");
+
+    const variant: ModelVariant = {
+      num_of_params: parseFloat(model.num_of_params),
+      architecture: model.architecture,
+      modality: model.modality,
+      hidden_dim_size: model.hidden_dim_size,
+      num_of_layers: model.num_of_layers,
+      num_kv_cache_layers: model.num_kv_cache_layers || undefined,
+      num_of_active_params: model.num_of_active_params || undefined,
+      num_of_experts: model.num_of_experts || undefined,
+      num_of_active_experts: model.num_of_active_experts || undefined,
+      attention_structure: model.attention_structure,
+      num_attention_heads: model.num_attention_heads || undefined,
+      num_key_value_heads: model.num_key_value_heads || undefined,
+      head_dim: model.head_dim || undefined,
+    };
+    const hybrid = calculateVram(
+      baseInput({ model_variant: variant, seq_length: 65536 }),
+    );
+    const allLayers = calculateVram(
+      baseInput({
+        model_variant: { ...variant, num_kv_cache_layers: undefined },
+        seq_length: 65536,
+      }),
+    );
+
+    expect(breakdownSize(hybrid, "KV Cache")).toBe(
+      breakdownSize(allLayers, "KV Cache") / 4,
+    );
+  });
+
   it("loads corrected architecture metadata", () => {
     const mistral = getModelBySlug("mistral-small-2501");
     const deepseek = getModelBySlug("deepseek-v3");
@@ -334,4 +369,35 @@ describe("calculator sanity", () => {
       head_dim: 128,
     });
   });
+  it("loads recent open-weight model releases", () => {
+    const expectedModels = [
+      ["glm-52", "744.00", 40, 1048576],
+      ["kimi-k27-code", "1000.00", 32, 262144],
+      ["minimax-m27", "229.00", 10, 204800],
+      ["minimax-m3", "428.00", 23, 1048576],
+      ["mistral-medium-35-128b", "128.00", null, 262144],
+      ["mistral-small-4-119b-a6b", "119.00", 6.5, 262144],
+      ["nvidia-nemotron-3-super-120b-a12b", "120.00", 12, 1048576],
+      ["qwen3-coder-next-80b-a3b", "80.00", 3, 262144],
+      ["qwen36-27b", "27.00", null, 262144],
+    ] as const;
+
+    for (const [slug, total, active, context] of expectedModels) {
+      expect(getModelBySlug(slug)).toMatchObject({
+        num_of_params: total,
+        num_of_active_params: active,
+        context_length: context,
+      });
+    }
+  });
+
+  it("keeps active MoE parameters at or below total parameters", () => {
+    for (const model of models) {
+      if (model.num_of_active_params === null) continue;
+      expect(model.num_of_active_params).toBeLessThanOrEqual(
+        parseFloat(model.num_of_params),
+      );
+    }
+  });
+
 });
